@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0-beta.4
+
+- Experimental option B for product `tPQJmoIbEC`, Vacuum mode (2) only: send
+  both CleanParam pass-count fields 5 and 6 while retaining mode/task type 2.
+- Modes 3–5, other product IDs, Freo Mind and return-to-dock are unchanged.
+- Hardware behavior is not yet verified. Stop the test if the robot mops in
+  Vacuum mode. Stable rollback: v0.10.1; previous experiment: beta.3.
+
+
 ## 0.11.0-beta.3
 
 - Recognizes the reported Freo Z10 product ID `tPQJmoIbEC` and routes manual

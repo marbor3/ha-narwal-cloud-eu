@@ -1,7 +1,24 @@
 # Freo Z10 beta protocol
 
-Version `0.11.0-beta.3` adds a deliberately isolated command profile for Freo
+Version `0.11.0-beta.4` adds a deliberately isolated command profile for Freo
 Z10 product keys `OlkUn3oUCu` and `tPQJmoIbEC`.
+
+## Option B experiment (beta.4)
+
+Only product `tPQJmoIbEC` in Vacuum mode (2) sends both pass-count fields 5
+and 6, each set to the requested cycles. Both mode selectors remain 2. This
+tests the reporter’s hypothesis; it does not establish vacuum-only semantics.
+Modes 3–5, `OlkUn3oUCu`, YJCC012, Freo Mind, recall and response handling are
+unchanged from beta.3. No physical robot was used for local regression tests.
+
+In HACS use Redownload, show beta versions and select `v0.11.0-beta.4`, then
+restart Home Assistant. Start one supervised whole-home Vacuum job, one cycle,
+from the dock. Check that it continues beyond the prior 4–12 seconds **and only
+vacuums**. Stop immediately if it begins mopping. Do not test other modes yet.
+Report physical behavior, duration and any HA error/timeout, plus only redacted
+route/completion lines. Never post credentials, device IDs or raw maps.
+Rollback through HACS Redownload to `v0.10.1` and restart; beta.3 remains
+available for comparison. Return-to-dock and Freo Mind are not fixed here.
 
 ## Start behavior
 

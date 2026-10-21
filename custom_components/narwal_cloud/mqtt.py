@@ -147,6 +147,7 @@ def _start_clean_body(
     *,
     map_id: int,
     mode: int,
+    product_id: str = "",
     suction: int = 2,
     humidity: int = 2,
     cycles: int = 1,
@@ -169,6 +170,10 @@ def _start_clean_body(
         4: (7,),
         5: (5, 6),
     }
+    # Option-B hardware experiment: only this reported Z10 variant, vacuum only.
+    # Keep both mode selectors at 2; do not turn the task into vacuum-then-mop.
+    if product_id == "tPQJmoIbEC" and mode == 2:
+        pass_fields[2] = (5, 6)
     items = b""
     for sequence, room_id in enumerate(room_ids, start=1):
         zone = _protobuf_varint(1, 1) + _protobuf_varint(2, room_id)
@@ -748,6 +753,7 @@ async def async_publish_task_command(
             room_ids or [],
             map_id=map_id,
             mode=mode,
+            product_id=product_id,
             suction=suction,
             humidity=humidity,
             cycles=cycles,

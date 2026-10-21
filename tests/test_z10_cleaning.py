@@ -401,7 +401,60 @@ def test_api_wraps_z10_payload_validation_error() -> None:
     asyncio.run(run())
 
 
+def test_option_b_is_limited_to_reported_z10_vacuum_mode() -> None:
+    async def run() -> None:
+        calls = []
+        original_request = MQTT.async_request
+
+        async def request(*args, **kwargs):
+            calls.append((args, kwargs))
+            return _framed_response(b"\x08\x01")
+
+        try:
+            MQTT.async_request = request
+            for product in (REPORTED_Z10_PRODUCT_ID, Z10_PRODUCT_ID, "YJCC012", "unknown"):
+                for mode in range(2, 6):
+                    for cycles in range(1, 4):
+                        await MQTT.async_publish_task_command(
+                            "mqtts://eu.example.invalid:8883", "access", "client",
+                            product, "test-device", "easy_clean_start", [10, 1],
+                            map_id=42, mode=mode, cycles=cycles,
+                            response_required=product in (REPORTED_Z10_PRODUCT_ID, Z10_PRODUCT_ID),
+                        )
+                        args, kwargs = calls[-1]
+                        if product not in (REPORTED_Z10_PRODUCT_ID, Z10_PRODUCT_ID):
+                            assert args[5] == "clean/easy_clean/start"
+                            assert args[6] == MQTT._easy_clean_body([10, 1], mode=mode, cycles=cycles)
+                            assert kwargs["response_required"] is False
+                            continue
+                        assert args[5] == "clean/start_clean"
+                        assert kwargs["response_required"] is True
+                        baseline = MQTT._start_clean_body([10, 1], map_id=42, mode=mode, cycles=cycles)
+                        outer = PROTOCOL.decode_fields(args[6])
+                        task = PROTOCOL.decode_fields(_messages(outer, 1)[0])
+                        assert _integer(task, 5) == mode
+                        assert _integer(task, 1) == 42
+                        items = [PROTOCOL.decode_fields(raw) for raw in _messages(task, 2)]
+                        assert len(items) == 2
+                        for item in items:
+                            param = PROTOCOL.decode_fields(_messages(item, 2)[0])
+                            assert _integer(param, 1) == mode
+                            expected = {2: {5}, 3: {6}, 4: {7}, 5: {5, 6}}[mode]
+                            if product == REPORTED_Z10_PRODUCT_ID and mode == 2:
+                                expected = {5, 6}
+                            actual = {f.number for f in param if f.number in (5, 6, 7)}
+                            assert actual == expected, (product, mode, cycles, actual, expected)
+                            assert all(_integer(param, f) == cycles for f in expected)
+                        if product != REPORTED_Z10_PRODUCT_ID or mode != 2:
+                            assert args[6] == baseline
+        finally:
+            MQTT.async_request = original_request
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
+    test_option_b_is_limited_to_reported_z10_vacuum_mode()
     test_yjcc012_easy_clean_payload_remains_byte_identical()
     test_z10_start_clean_payload_carries_map_rooms_and_settings()
     test_z10_uses_start_clean_while_yjcc012_keeps_easy_clean()
