@@ -55,6 +55,15 @@
       },
       "main_brush_remaining": {
         "name": "Hovedbørstens resterende levetid"
+      },
+      "cleaning_time": {
+        "name": "Rengøringstid"
+      },
+      "cleaning_area": {
+        "name": "Rengjort areal"
+      },
+      "cleaning_progress": {
+        "name": "Rengøringsfremskridt"
       }
     },
     "button": {

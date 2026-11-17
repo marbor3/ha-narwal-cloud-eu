@@ -11,7 +11,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfArea, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -53,6 +53,9 @@ async def async_setup_entry(
             NarwalBatterySensor(coordinator),
             NarwalStatusSensor(coordinator, "movement_status"),
             NarwalStatusSensor(coordinator, "cleaning_status"),
+            NarwalCleanTaskSensor(coordinator, "cleaning_time"),
+            NarwalCleanTaskSensor(coordinator, "cleaning_area"),
+            NarwalCleanTaskSensor(coordinator, "cleaning_progress"),
         ]
     )
     current_codes: set[str] = set()
@@ -196,6 +199,71 @@ class NarwalStatusSensor(
         if current in ("charging", "docked", "idle"):
             return "stopped"
         return current
+
+
+def clean_task_value(status: dict[str, Any], key: str) -> int | None:
+    """Read current-task figures from the cloud work-status ``extend_data``.
+
+    This REST data is available even for models that never publish MQTT
+    broadcasts (e.g. Freo S / YJCC032).
+    """
+    extend = status.get("extend_data")
+    clean = extend.get("clean") if isinstance(extend, dict) else None
+    if not isinstance(clean, dict):
+        return None
+    value = clean.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(value)
+
+
+_CLEAN_TASK_SENSORS: dict[str, dict[str, Any]] = {
+    "cleaning_time": {
+        "device_class": SensorDeviceClass.DURATION,
+        "unit": UnitOfTime.MINUTES,
+        "icon": "mdi:timer-play-outline",
+    },
+    "cleaning_area": {
+        "device_class": SensorDeviceClass.AREA,
+        "unit": UnitOfArea.SQUARE_METERS,
+        "icon": "mdi:texture-box",
+    },
+    "cleaning_progress": {
+        "device_class": None,
+        "unit": PERCENTAGE,
+        "icon": "mdi:progress-check",
+    },
+}
+
+
+class NarwalCleanTaskSensor(
+    CoordinatorEntity[NarwalCloudCoordinator], SensorEntity
+):
+    """Current cleaning task figures reported by the cloud work status."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: NarwalCloudCoordinator, key: str) -> None:
+        super().__init__(coordinator)
+        spec = _CLEAN_TASK_SENSORS[key]
+        self._key = key
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{coordinator.device_id}_{key}"
+        self._attr_device_class = spec["device_class"]
+        self._attr_native_unit_of_measurement = spec["unit"]
+        self._attr_icon = spec["icon"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.device_id)},
+            manufacturer=NAME,
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        return clean_task_value(self.coordinator.data["status"], self._key)
 
 
 class NarwalConsumableSensor(

@@ -26,6 +26,11 @@ from .protocol import (
 
 MAP_REFRESH_INTERVAL = timedelta(minutes=5)
 MAP_CACHE_VERSION = 1
+# Some models (e.g. Freo S / YJCC032) accept cloud commands but never publish
+# MQTT broadcasts back. After this many consecutive failures the live MQTT
+# reads back off and the cloud work-status endpoint alone drives the entities.
+LIVE_FAILURES_BEFORE_BACKOFF = 3
+LIVE_RETRY_INTERVAL = timedelta(minutes=10)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -81,6 +86,38 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.suction_power = 2
         self.mop_humidity = 2
         self.cleaning_cycles = 1
+        self._live_failures = 0
+        self._live_retry_at: datetime | None = None
+
+    @property
+    def live_data_available(self) -> bool:
+        """Whether MQTT live data (battery, map, pose) currently works."""
+        return self._live_retry_at is None
+
+    def _live_backoff_active(self) -> bool:
+        return (
+            self._live_retry_at is not None
+            and datetime.now().astimezone() < self._live_retry_at
+        )
+
+    def _record_live_result(self, ok: bool) -> None:
+        """Track MQTT live-data health and back off for silent models."""
+        if ok:
+            if self._live_retry_at is not None:
+                _LOGGER.info("Narwal live MQTT data is available again")
+            self._live_failures = 0
+            self._live_retry_at = None
+            return
+        self._live_failures += 1
+        if self._live_failures >= LIVE_FAILURES_BEFORE_BACKOFF:
+            if self._live_retry_at is None:
+                _LOGGER.warning(
+                    "Narwal robot does not answer live MQTT requests; using "
+                    "cloud work status only (battery, map and position are "
+                    "unavailable). Retrying every %s",
+                    LIVE_RETRY_INTERVAL,
+                )
+            self._live_retry_at = datetime.now().astimezone() + LIVE_RETRY_INTERVAL
 
     async def async_restore_cached_map(self) -> None:
         """Restore the last valid map and plans before contacting the robot."""
@@ -137,7 +174,7 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if (
                 last_map_activity is None
                 or now - last_map_activity >= MAP_REFRESH_INTERVAL
-            ) and (
+            ) and not self._live_backoff_active() and (
                 self._map_refresh_task is None
                 or self._map_refresh_task.done()
             ):
@@ -164,12 +201,15 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, *, capture_display: bool = False
     ) -> dict[str, int]:
         """Read optional live battery data without failing core polling."""
+        if self._live_backoff_active():
+            return {}
         try:
             status = await self.client.async_get_base_status(
                 self.device_id,
                 self.product_id,
                 capture_display=capture_display,
             )
+            self._record_live_result(True)
             display = self.client.last_display_map if capture_display else None
             if display is not None and self.map_data.compressed_grid:
                 self.map_data = merge_display_map(self.map_data, display)
@@ -184,10 +224,12 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
             return status
         except NarwalCloudError:
-            _LOGGER.warning(
-                "Unable to refresh Narwal battery status",
-                exc_info=True,
-            )
+            # Only the first failures are worth a warning; silent models would
+            # otherwise flood the log every poll.
+            if self._live_failures < LIVE_FAILURES_BEFORE_BACKOFF - 1:
+                _LOGGER.warning("Unable to refresh Narwal battery status")
+            _LOGGER.debug("Narwal live status failure", exc_info=True)
+            self._record_live_result(False)
             return {}
 
     async def _async_get_consumables(self) -> list[dict[str, Any]]:

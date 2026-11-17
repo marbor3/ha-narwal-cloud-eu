@@ -3,14 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import ssl
 import uuid
 from typing import Any
 from urllib.parse import urlparse
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class NarwalMqttError(Exception):
     """The Narwal broker rejected or failed a command connection."""
+
+
+def _log_packet(direction: str, packet_type: int, body: bytes) -> None:
+    """Debug-log one MQTT packet (topic, size, payload head) for model diagnosis."""
+    if not _LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    if packet_type == 3:
+        topic = _mqtt_publish_topic(body)
+        try:
+            payload = _mqtt_publish_payload(body)
+        except NarwalMqttError:
+            payload = b""
+        _LOGGER.debug(
+            "MQTT %s PUBLISH %s len=%d head=%s",
+            direction,
+            topic,
+            len(payload),
+            payload[:96].hex(),
+        )
+    else:
+        _LOGGER.debug(
+            "MQTT %s type=%d len=%d head=%s",
+            direction,
+            packet_type,
+            len(body),
+            body[:24].hex(),
+        )
 
 
 def _varint(value: int) -> bytes:
@@ -323,6 +353,15 @@ async def _async_request_sequence(
             _field(f"/{product_id}/{device_id}/{suffix}") + b"\x00"
             for suffix in broadcast_suffixes
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            # Diagnostic: also listen to everything under this robot so models
+            # that publish on other topics (e.g. Freo S / YJCC032) show up.
+            # Only topics carrying this account's own device id.
+            for wildcard in (
+                f"/{product_id}/{device_id}/#",
+                f"/+/{device_id}/#",
+            ):
+                broadcast_subscribe_body += _field(wildcard) + b"\x00"
         broadcast_subscribe_packet = (
             b"\x82"
             + _varint(len(broadcast_subscribe_body))
@@ -336,7 +375,8 @@ async def _async_request_sequence(
         )[0] >> 4
         remaining = await asyncio.wait_for(_read_varint(reader), timeout=15)
         stage = "broadcast SUBACK body"
-        await asyncio.wait_for(reader.readexactly(remaining), timeout=15)
+        suback = await asyncio.wait_for(reader.readexactly(remaining), timeout=15)
+        _log_packet("RX", packet_type, suback)
         if packet_type != 9:
             raise NarwalMqttError(
                 "Narwal rejected the broadcast subscriptions"
@@ -394,12 +434,19 @@ async def _async_request_sequence(
                         _read_varint(reader), timeout=15
                     )
                     stage = f"{topic_suffix} SUBACK body"
-                    await asyncio.wait_for(
+                    packet = await asyncio.wait_for(
                         reader.readexactly(remaining), timeout=15
                     )
+                    _log_packet("RX", packet_type, packet)
                     if packet_type == 9:
                         break
 
+            _LOGGER.debug(
+                "MQTT TX PUBLISH %s len=%d response=%s",
+                topic,
+                len(command_payload),
+                response_topic or "-",
+            )
             writer.write(publish_packet)
             await writer.drain()
             if not response_required:
@@ -434,6 +481,7 @@ async def _async_request_sequence(
                 response_packet = await asyncio.wait_for(
                     reader.readexactly(remaining), timeout=15
                 )
+                _log_packet("RX", packet_type, response_packet)
                 actual_topic = (
                     _mqtt_publish_topic(response_packet)
                     if packet_type == 3
@@ -489,6 +537,7 @@ async def _async_request_sequence(
                 packet = await asyncio.wait_for(
                     reader.readexactly(remaining), timeout=15
                 )
+                _log_packet("RX", packet_type, packet)
                 actual_topic = (
                     _mqtt_publish_topic(packet) if packet_type == 3 else ""
                 )

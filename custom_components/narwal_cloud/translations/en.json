@@ -55,6 +55,15 @@
       },
       "main_brush_remaining": {
         "name": "Main brush remaining time"
+      },
+      "cleaning_time": {
+        "name": "Cleaning time"
+      },
+      "cleaning_area": {
+        "name": "Cleaned area"
+      },
+      "cleaning_progress": {
+        "name": "Cleaning progress"
       }
     },
     "button": {

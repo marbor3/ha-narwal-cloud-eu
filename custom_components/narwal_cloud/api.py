@@ -7,10 +7,14 @@ logging or exceptions.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import ClientError, ClientSession
+
+_LOGGER = logging.getLogger(__name__)
 
 from .auth import (
     NarwalCredentials,
@@ -261,6 +265,14 @@ class NarwalCloudClient:
         result = payload.get("result")
         if not isinstance(result, dict):
             raise NarwalCloudError("Narwal did not return the robot state")
+        _LOGGER.debug(
+            "Narwal work-status: %s",
+            {
+                k: v
+                for k, v in result.items()
+                if not isinstance(v, str) or len(v) < 24
+            },
+        )
         return result
 
     async def async_get_base_status(
@@ -305,6 +317,11 @@ class NarwalCloudClient:
         result = payload.get("result")
         if not isinstance(result, str) or "://" not in result:
             raise NarwalCloudError("Narwal did not return an MQTT broker")
+        _LOGGER.debug(
+            "Narwal broker for country %s: %s",
+            BROKER_DISCOVERY_COUNTRY,
+            urlparse(result).hostname,
+        )
         return result
 
     async def async_get_consumables(

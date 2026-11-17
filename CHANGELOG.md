@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.2
+
+- Adds support for robots that accept cloud commands but never publish MQTT
+  broadcasts back, observed on the Freo S (YJCC032) with a Polish EU account.
+  After three failed live-status reads the integration backs off for ten
+  minutes and drives the entities from the cloud work-status endpoint alone,
+  instead of logging a warning with a traceback every poll.
+- Adds cleaning time, cleaned area, and cleaning progress sensors for the
+  current task, read from the work-status `extend_data` that every model
+  reports.
+- Debug logging now records every MQTT packet's topic, size, and payload head,
+  plus a subscription to all topics of the configured robot, to help diagnose
+  other models. Nothing extra is subscribed unless debug logging is enabled.
+
 ## 0.10.1
 
 - Completes Danish translations for dock buttons, cleaning selectors, selector
