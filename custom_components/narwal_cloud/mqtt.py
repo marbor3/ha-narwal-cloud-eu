@@ -353,15 +353,6 @@ async def _async_request_sequence(
             _field(f"/{product_id}/{device_id}/{suffix}") + b"\x00"
             for suffix in broadcast_suffixes
         )
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            # Diagnostic: also listen to everything under this robot so models
-            # that publish on other topics (e.g. Freo S / YJCC032) show up.
-            # Only topics carrying this account's own device id.
-            for wildcard in (
-                f"/{product_id}/{device_id}/#",
-                f"/+/{device_id}/#",
-            ):
-                broadcast_subscribe_body += _field(wildcard) + b"\x00"
         broadcast_subscribe_packet = (
             b"\x82"
             + _varint(len(broadcast_subscribe_body))
@@ -599,6 +590,130 @@ async def _async_request_sequence(
                 await writer.wait_closed()
             except (OSError, ConnectionError):
                 pass
+
+
+async def async_thing_request(
+    broker_url: str,
+    access_token: str,
+    client_uuid: str,
+    product_id: str,
+    device_id: str,
+    requests: list[tuple[str, str, dict[str, Any]]],
+    *,
+    timeout: float = 15,
+) -> dict[str, dict[str, Any]]:
+    """Send JSON thing-model messages and collect replies by ``messageId``.
+
+    ODM robots such as the Freo S (YJCC032) do not use Narwal's protobuf topics.
+    The official app publishes plain JSON to ``/<product>/<device>/thing/...``
+    and the robot answers on ``<topic>/reply`` with the same ``messageId``.
+    ``requests`` holds ``(topic_suffix, reply_suffix, payload)``; payloads get a
+    ``messageId`` if they have none. Returns ``{messageId: reply_json}``.
+    """
+    import json  # local import keeps module import cheap
+
+    parsed = urlparse(broker_url)
+    host = parsed.hostname
+    if not host:
+        raise NarwalMqttError("Narwal returned an invalid broker address")
+    port = parsed.port or 8883
+    client_id = f"app_{client_uuid}_{uuid.uuid4()}"
+    connect_body = (
+        _field("MQTT")
+        + bytes([5, 0xC2])
+        + (30).to_bytes(2, "big")
+        + b"\x00"
+        + _field(client_id)
+        + _field(client_uuid)
+        + _field(access_token)
+    )
+    prefix = f"/{product_id}/{device_id}/"
+    pending: dict[str, str] = {}
+    replies: dict[str, dict[str, Any]] = {}
+    writer: asyncio.StreamWriter | None = None
+    stage = "connect"
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                host, port, ssl=ssl.create_default_context(), server_hostname=host
+            ),
+            timeout=15,
+        )
+        writer.write(b"\x10" + _varint(len(connect_body)) + connect_body)
+        await writer.drain()
+        stage = "CONNACK"
+        packet_type = (await asyncio.wait_for(reader.readexactly(1), 15))[0] >> 4
+        body = await asyncio.wait_for(
+            reader.readexactly(await _read_varint(reader)), 15
+        )
+        if packet_type != 2 or len(body) < 2 or body[1] != 0:
+            raise NarwalMqttError("Narwal rejected the MQTT session")
+
+        # Subscribe to each distinct reply topic first, like the official app.
+        reply_topics = sorted({prefix + reply for _, reply, _ in requests})
+        sub = b"\x00\x01\x00" + b"".join(_field(t) + b"\x00" for t in reply_topics)
+        writer.write(b"\x82" + _varint(len(sub)) + sub)
+        await writer.drain()
+        stage = "SUBACK"
+        while True:
+            first = (await asyncio.wait_for(reader.readexactly(1), 15))[0] >> 4
+            packet = await asyncio.wait_for(
+                reader.readexactly(await _read_varint(reader)), 15
+            )
+            _log_packet("RX", first, packet)
+            if first == 9:
+                break
+
+        for topic_suffix, reply_suffix, payload in requests:
+            message = {**payload}
+            message.setdefault("messageId", str(uuid.uuid1()))
+            pending[message["messageId"]] = prefix + reply_suffix
+            data = json.dumps(message, separators=(",", ":")).encode()
+            publish_body = _field(prefix + topic_suffix) + b"\x00" + data
+            _LOGGER.debug("MQTT TX THING %s %s", topic_suffix, data[:300])
+            writer.write(b"\x30" + _varint(len(publish_body)) + publish_body)
+        await writer.drain()
+
+        stage = "thing reply"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while pending and (left := deadline - loop.time()) > 0:
+            try:
+                first = (await asyncio.wait_for(reader.readexactly(1), left))[0] >> 4
+            except TimeoutError:
+                break
+            packet = await asyncio.wait_for(
+                reader.readexactly(await _read_varint(reader)), 15
+            )
+            _log_packet("RX", first, packet)
+            if first != 3:
+                continue
+            topic = _mqtt_publish_topic(packet)
+            try:
+                reply = json.loads(_mqtt_publish_payload(packet))
+            except ValueError:
+                continue
+            message_id = reply.get("messageId") if isinstance(reply, dict) else None
+            if message_id in pending and pending[message_id] == topic:
+                replies[message_id] = reply
+                pending.pop(message_id)
+        if pending:
+            raise NarwalMqttError(
+                f"Narwal robot did not answer {len(pending)} thing request(s)"
+            )
+        return replies
+    except (OSError, TimeoutError, asyncio.IncompleteReadError) as err:
+        raise NarwalMqttError(
+            f"Unable to send the Narwal thing request during {stage}"
+        ) from err
+    finally:
+        if writer is not None:
+            try:
+                writer.write(b"\xE0\x00")
+                await writer.drain()
+            except (OSError, ConnectionError):
+                pass
+            writer.close()
 
 
 async def async_request(

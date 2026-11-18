@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from aiohttp import ClientError, ClientSession
 
+
 _LOGGER = logging.getLogger(__name__)
 
 from .auth import (
@@ -23,7 +24,9 @@ from .auth import (
 from .const import CLIENT_APP_VERSION, CLIENT_APPLICATION_ID, CLIENT_VERSION_CODE
 from .mqtt import (
     NarwalMqttError,
+
     async_publish_task_command,
+    async_thing_request,
     async_request,
     async_request_base_status,
 )
@@ -42,6 +45,7 @@ from .region import (
     COUNTRY_CODE,
     build_login_payload,
 )
+
 
 TokenUpdateCallback = Callable[[str, str], Awaitable[None]]
 
@@ -260,7 +264,9 @@ class NarwalCloudClient:
         payload = await self._request(
             "GET",
             "/device-task/work-status/get",
-            params={"device_id": device_id, "product_id": product_id, "source": "0"},
+            # source=1 is what the official app sends; source=0 returns a stale
+            # snapshot without battery data (verified on a Freo S, YJCC032).
+            params={"device_id": device_id, "product_id": product_id, "source": "1"},
         )
         result = payload.get("result")
         if not isinstance(result, dict):
@@ -380,6 +386,79 @@ class NarwalCloudClient:
             )
         except NarwalMqttError as err:
             raise NarwalCloudError(str(err)) from err
+
+    async def async_thing_get_reported(
+        self,
+        device_id: str,
+        product_id: str,
+        groups: tuple[str, ...] = ("robot_status", "clean"),
+    ) -> dict[str, dict[str, Any]]:
+        """Read reported thing-model properties (ODM robots) as plain values."""
+        broker_url = await self.async_get_broker_url()
+        requests = [
+            (
+                "thing/property/up",
+                "thing/property/up/reply",
+                {"method": "getReported", "properties": {group: []}},
+            )
+            for group in groups
+        ]
+        try:
+            replies = await async_thing_request(
+                broker_url,
+                self.access_token,
+                self.client_uuid,
+                product_id,
+                device_id,
+                requests,
+            )
+        except NarwalMqttError as err:
+            raise NarwalCloudError(str(err)) from err
+        result: dict[str, dict[str, Any]] = {}
+        for reply in replies.values():
+            payload = reply.get("payload")
+            if not isinstance(payload, dict) or payload.get("code") not in (0, None):
+                continue
+            for group, values in payload.items():
+                if isinstance(values, dict):
+                    result[group] = {
+                        key: value.get("value") if isinstance(value, dict) else value
+                        for key, value in values.items()
+                    }
+        return result
+
+    async def async_thing_invoke(
+        self,
+        device_id: str,
+        product_id: str,
+        module: str,
+        action: str,
+        action_input: dict[str, Any] | None = None,
+    ) -> None:
+        """Invoke a thing-model action (ODM robots) and require ``code == 0``."""
+        broker_url = await self.async_get_broker_url()
+        request = {
+            "method": "invoke",
+            "actionIdentifier": action,
+            "module": module,
+            "input": action_input or {},
+        }
+        try:
+            replies = await async_thing_request(
+                broker_url,
+                self.access_token,
+                self.client_uuid,
+                product_id,
+                device_id,
+                [("thing/action/request", "thing/action/request/reply", request)],
+            )
+        except NarwalMqttError as err:
+            raise NarwalCloudError(str(err)) from err
+        reply = next(iter(replies.values()), {})
+        if reply.get("code") != 0:
+            raise NarwalCloudError(
+                f"Narwal robot rejected {action} (code {reply.get('code')})"
+            )
 
     async def async_get_map(
         self, device_id: str, product_id: str

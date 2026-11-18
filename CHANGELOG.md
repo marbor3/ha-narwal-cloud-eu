@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.0
+
+- Full support for the Narwal Freo S (YJCC032, product key `ZTM5lnVgLG`).
+  It is an ODM robot that ignores Narwal's protobuf task topics and instead
+  speaks a JSON "thing model" over the same MQTT broker:
+  - status: `getReported` on `/<product>/<device>/thing/property/up`, answered
+    on `.../thing/property/up/reply` with live battery, dock, pause, return,
+    fault and current-task values;
+  - commands: `invoke` on `/<product>/<device>/thing/action/request` with
+    `start_sweep`, `pause_sweeping`, `recall_station` and `stop_sweeping`
+    (module `clean`), confirmed on `.../thing/action/request/reply`.
+  Start, pause, resume (start while paused) and return to dock were verified
+  from Home Assistant against a real Freo S.
+- The cloud work status is now requested with `source=1`, as the official app
+  does. `source=0` returned a stale snapshot without battery data.
+- Thing-model robots skip the protobuf live-status and map requests entirely.
+
 ## 0.10.2
 
 - Adds support for robots that accept cloud commands but never publish MQTT

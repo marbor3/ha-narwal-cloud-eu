@@ -119,8 +119,37 @@ class NarwalCloudVacuum(CoordinatorEntity[NarwalCloudCoordinator], StateVacuumEn
         self.async_write_ha_state()
         self.coordinator.async_update_listeners()
 
+    async def _async_thing_invoke(
+        self, action: str, action_input: dict[str, Any] | None = None
+    ) -> None:
+        """Send one ODM thing-model action and refresh the state right after."""
+        await self.coordinator.client.async_thing_invoke(
+            self.coordinator.device_id,
+            self.coordinator.product_id,
+            "clean",
+            action,
+            action_input,
+        )
+        self.coordinator.invalidate_thing_status()
+        await self.coordinator.async_request_refresh()
+
+    def _thing_start_input(self) -> dict[str, Any]:
+        """Whole-house start parameters as sent by the official app."""
+        cycles = self.coordinator.cleaning_cycles
+        return {
+            "sweep_mode": 0,
+            "sweep_type": 2,
+            "sweep_times": cycles,
+            "mop_times": cycles,
+            "suction_level": self.coordinator.suction_power,
+            "water_level": self.coordinator.mop_humidity,
+        }
+
     async def async_pause(self) -> None:
         """Pause the current Narwal task."""
+        if self.coordinator.uses_thing_model:
+            await self._async_thing_invoke("pause_sweeping")
+            return
         await self.coordinator.client.async_send_task_command(
             self.coordinator.device_id,
             self.coordinator.product_id,
@@ -130,6 +159,11 @@ class NarwalCloudVacuum(CoordinatorEntity[NarwalCloudCoordinator], StateVacuumEn
 
     async def async_start(self) -> None:
         """Resume a paused task or create a new whole-house Freo Mind task."""
+        if self.coordinator.uses_thing_model:
+            # The ODM firmware resumes an interrupted task on start_sweep
+            # (breakpoint_continue); there is no separate resume action.
+            await self._async_thing_invoke("start_sweep", self._thing_start_input())
+            return
         status = self.coordinator.data["status"]
         if (
             status.get("pause")
@@ -160,6 +194,9 @@ class NarwalCloudVacuum(CoordinatorEntity[NarwalCloudCoordinator], StateVacuumEn
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
         """Recall the robot to its dock."""
+        if self.coordinator.uses_thing_model:
+            await self._async_thing_invoke("recall_station")
+            return
         await self.coordinator.client.async_send_task_command(
             self.coordinator.device_id,
             self.coordinator.product_id,
@@ -213,6 +250,9 @@ class NarwalCloudVacuum(CoordinatorEntity[NarwalCloudCoordinator], StateVacuumEn
 
     async def async_stop(self, **kwargs: Any) -> None:
         """End the active Narwal task."""
+        if self.coordinator.uses_thing_model:
+            await self._async_thing_invoke("stop_sweeping")
+            return
         await self.coordinator.client.async_send_task_command(
             self.coordinator.device_id,
             self.coordinator.product_id,

@@ -25,6 +25,17 @@ CONF_SCAN_INTERVAL = "scan_interval"
 AUTH_METHOD_ACCOUNT = "account"
 AUTH_METHOD_TOKEN = "token"
 
+# ODM robots that speak Narwal's JSON "thing model" instead of the protobuf
+# task topics. Verified: ZTM5lnVgLG = Narwal Freo S (YJCC032, product group BX3).
+THING_MODEL_PRODUCT_IDS = frozenset({"ZTM5lnVgLG"})
+
+# Thing-model robot_status.status codes observed on the Freo S.
+THING_STATUS_PAUSED = 3
+THING_STATUS_CLEANING = 4
+THING_STATUS_RETURNING = 5
+THING_STATUS_DOCKED = 6
+THING_STATUS_ERROR = 7
+
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=1)
 MIN_SCAN_INTERVAL_SECONDS = 1
 MAX_SCAN_INTERVAL_SECONDS = 300

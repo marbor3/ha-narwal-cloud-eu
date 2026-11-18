@@ -13,7 +13,16 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NarwalCloudAuthError, NarwalCloudClient, NarwalCloudError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    THING_MODEL_PRODUCT_IDS,
+    THING_STATUS_CLEANING,
+    THING_STATUS_DOCKED,
+    THING_STATUS_ERROR,
+    THING_STATUS_PAUSED,
+    THING_STATUS_RETURNING,
+)
 from .protocol import (
     NarwalCleanPlan,
     NarwalMap,
@@ -31,6 +40,41 @@ MAP_CACHE_VERSION = 1
 # reads back off and the cloud work-status endpoint alone drives the entities.
 LIVE_FAILURES_BEFORE_BACKOFF = 3
 LIVE_RETRY_INTERVAL = timedelta(minutes=10)
+THING_REFRESH_INTERVAL = timedelta(seconds=10)
+
+
+def merge_thing_status(
+    status: dict[str, Any], thing: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Overlay ODM thing-model values onto the cloud work-status fields."""
+    robot = thing.get("robot_status") or {}
+    clean = thing.get("clean") or {}
+    merged = {**status}
+    if isinstance(robot.get("battery_percentage"), (int, float)):
+        merged["battery_percentage"] = robot["battery_percentage"]
+    fault = robot.get("fault")
+    code = robot.get("status")
+    if "robot_in_station" in robot:
+        merged["in_station"] = bool(robot["robot_in_station"])
+    if isinstance(fault, int):
+        merged["fault_code"] = fault
+        merged["fault"] = fault != 0 and code == THING_STATUS_ERROR
+    if isinstance(code, int):
+        merged["thing_status"] = code
+        merged["pause"] = code == THING_STATUS_PAUSED
+        merged["recall"] = code == THING_STATUS_RETURNING
+        if code == THING_STATUS_CLEANING:
+            merged["free"] = False
+            merged["in_station"] = False
+        elif code == THING_STATUS_DOCKED:
+            merged["in_station"] = True
+        elif code == THING_STATUS_ERROR:
+            merged["fault"] = True
+    if clean:
+        extend = dict(merged.get("extend_data") or {})
+        extend["clean"] = {**(extend.get("clean") or {}), **clean}
+        merged["extend_data"] = extend
+    return merged
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -88,6 +132,30 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.cleaning_cycles = 1
         self._live_failures = 0
         self._live_retry_at: datetime | None = None
+        self.uses_thing_model = product_id in THING_MODEL_PRODUCT_IDS
+        self._thing: dict[str, dict[str, Any]] = {}
+        self._thing_read_at: datetime | None = None
+
+    async def _async_get_thing_status(self) -> dict[str, dict[str, Any]]:
+        """Read ODM robot status over the JSON thing model (cached ~10 s)."""
+        now = datetime.now().astimezone()
+        if (
+            self._thing_read_at is not None
+            and now - self._thing_read_at < THING_REFRESH_INTERVAL
+        ):
+            return self._thing
+        self._thing_read_at = now
+        try:
+            self._thing = await self.client.async_thing_get_reported(
+                self.device_id, self.product_id
+            )
+        except NarwalCloudError:
+            _LOGGER.debug("Narwal thing-model status unavailable", exc_info=True)
+        return self._thing
+
+    def invalidate_thing_status(self) -> None:
+        """Force the next refresh to re-read the robot (after a command)."""
+        self._thing_read_at = None
 
     @property
     def live_data_available(self) -> bool:
@@ -161,20 +229,25 @@ class NarwalCloudCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Narwal intermittently returns malformed consumable data when
             # broker discovery and consumable REST calls overlap. Keep these
             # optional reads sequential so one feature cannot block setup.
-            capture_display = not bool(status.get("free")) and not bool(
-                status.get("in_station")
-            )
-            base_status = await self._async_get_base_status(
-                capture_display=capture_display
-            )
+            if self.uses_thing_model:
+                status = merge_thing_status(
+                    status, await self._async_get_thing_status()
+                )
+            else:
+                capture_display = not bool(status.get("free")) and not bool(
+                    status.get("in_station")
+                )
+                base_status = await self._async_get_base_status(
+                    capture_display=capture_display
+                )
+                status = {**status, **base_status}
             consumables = await self._async_get_consumables()
-            status = {**status, **base_status}
             now = datetime.now().astimezone()
             last_map_activity = self._map_updated_at or self._map_attempted_at
             if (
                 last_map_activity is None
                 or now - last_map_activity >= MAP_REFRESH_INTERVAL
-            ) and not self._live_backoff_active() and (
+            ) and not self.uses_thing_model and not self._live_backoff_active() and (
                 self._map_refresh_task is None
                 or self._map_refresh_task.done()
             ):
